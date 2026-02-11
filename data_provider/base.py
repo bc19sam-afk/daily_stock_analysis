@@ -384,15 +384,26 @@ class DataFetcherManager:
         errors = []
         
         for fetcher in self._fetchers:
+            # === 核心修改：智能分流 (Start) ===
+            # 如果是澳洲股票(.AX) 或 美股(纯字母)，且当前工具不是雅虎，直接跳过
+            is_au_us = ('.AX' in stock_code) or (stock_code.isalpha()) or ('.US' in stock_code)
+            
+            if is_au_us and 'YfinanceFetcher' not in fetcher.name:
+                continue
+            # === 核心修改：智能分流 (End) ===
+
             try:
                 logger.info(f"尝试使用 [{fetcher.name}] 获取 {stock_code}...")
+                
+                # 👇👇👇 这里是你刚才漏掉的关键代码，必须加回来！ 👇👇👇
                 df = fetcher.get_daily_data(
                     stock_code=stock_code,
                     start_date=start_date,
                     end_date=end_date,
                     days=days
                 )
-                
+                # 👆👆👆 没有这一段，程序就废了 👆👆👆
+
                 if df is not None and not df.empty:
                     logger.info(f"[{fetcher.name}] 成功获取 {stock_code}")
                     return df, fetcher.name
