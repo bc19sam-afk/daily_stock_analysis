@@ -30,7 +30,7 @@ def fetch_url_content(url: str, timeout: int = 5) -> str:
     获取 URL 网页正文内容 (使用 newspaper3k)
     """
     try:
-        # 配置 newspaper3k
+        # 配置 paper3k
         config = Config()
         config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         config.request_timeout = timeout
@@ -901,7 +901,7 @@ class SearchService:
         "{name} {code} performance volume",
     ]
     
-    def __init__(
+def __init__(
         self,
         bocha_keys: Optional[List[str]] = None,
         tavily_keys: Optional[List[str]] = None,
@@ -909,43 +909,35 @@ class SearchService:
         serpapi_keys: Optional[List[str]] = None,
     ):
         """
-        初始化搜索服务
-
-        Args:
-            bocha_keys: 博查搜索 API Key 列表
-            tavily_keys: Tavily API Key 列表
-            brave_keys: Brave Search API Key 列表
-            serpapi_keys: SerpAPI Key 列表
+        初始化搜索服务（已针对澳洲股票优化：Tavily 优先，解决 Bocha 欠费问题）
         """
         self._providers: List[BaseSearchProvider] = []
 
-        # 初始化搜索引擎（按优先级排序）
-        # 1. Bocha 优先（中文搜索优化，AI摘要）
-        if bocha_keys:
-            self._providers.append(BochaSearchProvider(bocha_keys))
-            logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
-
-        # 2. Tavily（免费额度更多，每月 1000 次）
+        # 1. Tavily 优先（你有额度，且针对澳洲 ASX 股票的英文搜索能力最强）
         if tavily_keys:
             self._providers.append(TavilySearchProvider(tavily_keys))
             logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
 
-        # 3. Brave Search（隐私优先，全球覆盖）
+        # 2. SerpAPI 第二（Google 原生搜索，兜底能力极强）
+        if serpapi_keys:
+            self._providers.append(SerpAPISearchProvider(serpapi_keys))
+            logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
+
+        # 3. Brave Search 第三
         if brave_keys:
             self._providers.append(BraveSearchProvider(brave_keys))
             logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
 
-        # 4. SerpAPI 作为备选（每月 100 次）
-        if serpapi_keys:
-            self._providers.append(SerpAPISearchProvider(serpapi_keys))
-            logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
+        # 4. Bocha 降至最后（目前欠费报错，仅作最后尝试）
+        if bocha_keys:
+            self._providers.append(BochaSearchProvider(bocha_keys))
+            logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
         
         if not self._providers:
             logger.warning("未配置任何搜索引擎 API Key，新闻搜索功能将不可用")
 
-        # In-memory search result cache: {cache_key: (timestamp, SearchResponse)}
+        # 初始化内存缓存
         self._cache: Dict[str, Tuple[float, 'SearchResponse']] = {}
-        # Default cache TTL in seconds (10 minutes)
         self._cache_ttl: int = 600
     
     @staticmethod
