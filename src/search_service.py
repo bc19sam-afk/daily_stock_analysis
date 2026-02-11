@@ -6,9 +6,10 @@ A股/澳股自选股智能分析系统 - 搜索服务模块
 
 职责：
 1. 提供统一的新闻搜索接口
-2. 支持 Tavily 和 SerpAPI 两种搜索引擎
+2. 支持 Tavily, SerpAPI, Bocha, Brave 四种搜索引擎
 3. 多 Key 负载均衡和故障转移
 4. 搜索结果缓存和格式化
+5. 针对澳洲股票 (ASX) 进行了搜索源优先级优化
 """
 
 import logging
@@ -362,6 +363,8 @@ class SearchService:
         "{name} 股票 今日 股价",
         "{name} {code} 最新 行情 走势",
         "{name} 股票 分析 走势图",
+        "{name} K线 技术分析",
+        "{name} {code} 涨跌 成交量",
     ]
     
     def __init__(
@@ -399,6 +402,11 @@ class SearchService:
 
         self._cache: Dict[str, Tuple[float, 'SearchResponse']] = {}
         self._cache_ttl: int = 600
+
+    @property
+    def is_available(self) -> bool:
+        """检查是否有可用的搜索引擎"""
+        return any(p.is_available for p in self._providers)
 
     @staticmethod
     def _is_foreign_stock(stock_code: str) -> bool:
@@ -520,35 +528,214 @@ class SearchService:
                 lines.append("  未找到相关信息")
         
         return "\n".join(lines)
+    
+    def batch_search(
+        self,
+        stocks: List[Dict[str, str]],
+        max_results_per_stock: int = 3,
+        delay_between: float = 1.0
+    ) -> Dict[str, SearchResponse]:
+        """
+        Batch search news for multiple stocks.
+        """
+        results = {}
+        
+        for i, stock in enumerate(stocks):
+            if i > 0:
+                time.sleep(delay_between)
+            
+            code = stock.get('code', '')
+            name = stock.get('name', '')
+            
+            response = self.search_stock_news(code, name, max_results_per_stock)
+            results[code] = response
+        
+        return results
+
+    def search_stock_price_fallback(
+        self,
+        stock_code: str,
+        stock_name: str,
+        max_attempts: int = 3,
+        max_results: int = 5
+    ) -> SearchResponse:
+        """
+        Enhance search when data sources fail.
+        """
+
+        if not self.is_available:
+            return SearchResponse(
+                query=f"{stock_name} 股价走势",
+                results=[],
+                provider="None",
+                success=False,
+                error_message="未配置搜索引擎 API Key"
+            )
+        
+        logger.info(f"[增强搜索] 数据源失败，启动增强搜索: {stock_name}({stock_code})")
+        
+        all_results = []
+        seen_urls = set()
+        successful_providers = []
+        
+        # 使用多个关键词模板搜索
+        is_foreign = self._is_foreign_stock(stock_code)
+        keywords = self.ENHANCED_SEARCH_KEYWORDS_EN if is_foreign else self.ENHANCED_SEARCH_KEYWORDS
+        for i, keyword_template in enumerate(keywords[:max_attempts]):
+            query = keyword_template.format(name=stock_name, code=stock_code)
+            
+            logger.info(f"[增强搜索] 第 {i+1}/{max_attempts} 次搜索: {query}")
+            
+            # 依次尝试各个搜索引擎
+            for provider in self._providers:
+                if not provider.is_available:
+                    continue
+                
+                try:
+                    response = provider.search(query, max_results=3)
+                    
+                    if response.success and response.results:
+                        # 去重并添加结果
+                        for result in response.results:
+                            if result.url not in seen_urls:
+                                seen_urls.add(result.url)
+                                all_results.append(result)
+                                
+                        if provider.name not in successful_providers:
+                            successful_providers.append(provider.name)
+                        
+                        logger.info(f"[增强搜索] {provider.name} 返回 {len(response.results)} 条结果")
+                        break  # 成功后跳到下一个关键词
+                    else:
+                        logger.debug(f"[增强搜索] {provider.name} 无结果或失败")
+                        
+                except Exception as e:
+                    logger.warning(f"[增强搜索] {provider.name} 搜索异常: {e}")
+                    continue
+            
+            # 短暂延迟避免请求过快
+            if i < max_attempts - 1:
+                time.sleep(0.5)
+        
+        # 汇总结果
+        if all_results:
+            # 截取前 max_results 条
+            final_results = all_results[:max_results]
+            provider_str = ", ".join(successful_providers) if successful_providers else "None"
+            
+            logger.info(f"[增强搜索] 完成，共获取 {len(final_results)} 条结果（来源: {provider_str}）")
+            
+            return SearchResponse(
+                query=f"{stock_name}({stock_code}) 股价走势",
+                results=final_results,
+                provider=provider_str,
+                success=True,
+            )
+        else:
+            logger.warning(f"[增强搜索] 所有搜索均未返回结果")
+            return SearchResponse(
+                query=f"{stock_name}({stock_code}) 股价走势",
+                results=[],
+                provider="None",
+                success=False,
+                error_message="增强搜索未找到相关信息"
+            )
+
+    def search_stock_with_enhanced_fallback(
+        self,
+        stock_code: str,
+        stock_name: str,
+        include_news: bool = True,
+        include_price: bool = False,
+        max_results: int = 5
+    ) -> Dict[str, SearchResponse]:
+        """
+        综合搜索接口（支持新闻和股价信息）
+        """
+        results = {}
+        
+        if include_news:
+            results['news'] = self.search_stock_news(
+                stock_code, 
+                stock_name, 
+                max_results=max_results
+            )
+        
+        if include_price:
+            results['price'] = self.search_stock_price_fallback(
+                stock_code,
+                stock_name,
+                max_attempts=3,
+                max_results=max_results
+            )
+        
+        return results
+
+    def format_price_search_context(self, response: SearchResponse) -> str:
+        """
+        将股价搜索结果格式化为 AI 分析上下文
+        """
+        if not response.success or not response.results:
+            return "【股价走势搜索】未找到相关信息，请以其他渠道数据为准。"
+        
+        lines = [
+            f"【股价走势搜索结果】（来源: {response.provider}）",
+            "⚠️ 注意：以下信息来自网络搜索，仅供参考，可能存在延迟或不准确。",
+            ""
+        ]
+        
+        for i, result in enumerate(response.results, 1):
+            date_str = f" [{result.published_date}]" if result.published_date else ""
+            lines.append(f"{i}. 【{result.source}】{result.title}{date_str}")
+            lines.append(f"   {result.snippet[:200]}...")
+            lines.append("")
+        
+        return "\n".join(lines)
 
 
 # === 便捷函数 ===
 _search_service: Optional[SearchService] = None
 
 def get_search_service() -> SearchService:
+    """获取搜索服务单例"""
     global _search_service
+    
     if _search_service is None:
         from src.config import get_config
         config = get_config()
+        
         _search_service = SearchService(
             bocha_keys=config.bocha_api_keys,
             tavily_keys=config.tavily_api_keys,
             brave_keys=config.brave_api_keys,
             serpapi_keys=config.serpapi_keys,
         )
+    
     return _search_service
 
 def reset_search_service() -> None:
+    """重置搜索服务（用于测试）"""
     global _search_service
     _search_service = None
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
+    # 测试搜索服务
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s'
+    )
+    
+    # 手动测试（需要配置 API Key）
     service = get_search_service()
+    
     if service.is_available:
         print("=== 测试股票新闻搜索 ===")
         # 测试澳股代码
         response = service.search_stock_news("CBA.AX", "CommBank")
         print(f"搜索状态: {'成功' if response.success else '失败'}")
         print(f"搜索引擎: {response.provider}")
+        print(f"结果数量: {len(response.results)}")
+        print(f"耗时: {response.search_time:.2f}s")
         print("\n" + response.to_context())
+    else:
+        print("未配置搜索引擎 API Key，跳过测试")
