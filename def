@@ -5,7 +5,61 @@ A股自选股智能分析系统 - 搜索服务模块
 ===================================
 
 职责：
-1. 提供统一的新闻搜索接口
+1. 提供统一的新闻搜索接口def __init__(
+        self,
+        bocha_keys: Optional[List[str]] = None,
+        tavily_keys: Optional[List[str]] = None,
+        brave_keys: Optional[List[str]] = None,
+        serpapi_keys: Optional[List[str]] = None,
+    ):
+        """
+        初始化搜索服务（已针对澳洲股票优化：Tavily 优先）
+        """
+        self._providers: List[BaseSearchProvider] = []
+
+        # 1. Tavily 优先（针对 ASX 澳洲股票搜索能力强，且你有额度）
+        if tavily_keys:
+            self._providers.append(TavilySearchProvider(tavily_keys))
+            logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
+
+        # 2. SerpAPI 第二（Google 原生搜索，兜底能力最强）
+        if serpapi_keys:
+            self._providers.append(SerpAPISearchProvider(serpapi_keys))
+            logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
+
+        # 3. Brave Search 第三
+        if brave_keys:
+            self._providers.append(BraveSearchProvider(brave_keys))
+            logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
+
+        # 4. Bocha 降至最后（目前欠费，仅作最后备份）
+        if bocha_keys:
+            self._providers.append(BochaSearchProvider(bocha_keys))
+            logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
+        
+        if not self._providers:
+            logger.warning("未配置任何搜索引擎 API Key，新闻搜索功能将不可用")
+
+        # 初始化内存缓存
+        self._cache: Dict[str, Tuple[float, 'SearchResponse']] = {}
+        # 缓存有效期 10 分钟
+        self._cache_ttl: int = 600
+
+    @staticmethod
+    def _is_foreign_stock(stock_code: str) -> bool:
+        """判断是否为港股或美股"""
+        import re
+        code = stock_code.strip()
+        # 美股：1-5个大写字母，可能包含点（如 BRK.B）
+        if re.match(r'^[A-Za-z]{1,5}(\.[A-Za-z])?$', code):
+            return True
+        # 港股：带 hk 前缀或 5位纯数字
+        lower = code.lower()
+        if lower.startswith('hk'):
+            return True
+        if code.isdigit() and len(code) == 5:
+            return True
+        return False
 2. 支持 Tavily 和 SerpAPI 两种搜索引擎
 3. 多 Key 负载均衡和故障转移
 4. 搜索结果缓存和格式化
@@ -901,7 +955,7 @@ class SearchService:
         "{name} {code} performance volume",
     ]
     
-def __init__(
+    def __init__(
         self,
         bocha_keys: Optional[List[str]] = None,
         tavily_keys: Optional[List[str]] = None,
@@ -909,16 +963,16 @@ def __init__(
         serpapi_keys: Optional[List[str]] = None,
     ):
         """
-        初始化搜索服务（已针对澳洲股票优化：Tavily 优先，解决 Bocha 欠费问题）
+        初始化搜索服务（已针对澳洲股票优化：Tavily 优先）
         """
         self._providers: List[BaseSearchProvider] = []
 
-        # 1. Tavily 优先（你有额度，且针对澳洲 ASX 股票的英文搜索能力最强）
+        # 1. Tavily 优先（针对 ASX 澳洲股票搜索能力强，且你有额度）
         if tavily_keys:
             self._providers.append(TavilySearchProvider(tavily_keys))
             logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
 
-        # 2. SerpAPI 第二（Google 原生搜索，兜底能力极强）
+        # 2. SerpAPI 第二（Google 原生搜索，兜底能力最强）
         if serpapi_keys:
             self._providers.append(SerpAPISearchProvider(serpapi_keys))
             logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
@@ -928,7 +982,7 @@ def __init__(
             self._providers.append(BraveSearchProvider(brave_keys))
             logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
 
-        # 4. Bocha 降至最后（目前欠费报错，仅作最后尝试）
+        # 4. Bocha 降至最后（目前欠费，仅作最后备份）
         if bocha_keys:
             self._providers.append(BochaSearchProvider(bocha_keys))
             logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
@@ -938,8 +992,9 @@ def __init__(
 
         # 初始化内存缓存
         self._cache: Dict[str, Tuple[float, 'SearchResponse']] = {}
+        # 缓存有效期 10 分钟
         self._cache_ttl: int = 600
-    
+
     @staticmethod
     def _is_foreign_stock(stock_code: str) -> bool:
         """判断是否为港股或美股"""
